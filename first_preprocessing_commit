@@ -1,0 +1,192 @@
+#! /bin/bash
+
+## To use this script for a new subject, you will need to change the following:
+## fmri_input directory, T1 directory, AP,PA, BAP number, run number
+## You should be in the lcaging directory in aghaffari in order for this to run.
+## This is written for the visual runs, if it is auditory, change visuals to auditory.
+## Some other stuff in the .fsf file as well: output file, input file
+## You also need to be in the same folder with smoothing_highpass_script.py 
+
+fmri_input=/data/rawdata/lcaging_grp/LC_GrantFinal_Setup/BAP102_Session3_0916_UCR0120220712/visual_fMRI_Run_1_3
+T1dir=/data/rawdata/lcaging_grp/LC_GrantFinal_Setup/BAP102_Session3_0916_UCR0120220712/t1_mprage_low_res_2
+AP=/data/rawdata/lcaging_grp/LC_GrantFinal_Setup/BAP102_Session3_0916_UCR0120220712/visual_SE_EPI_Encoding_AP_8
+PA=/data/rawdata/lcaging_grp/LC_GrantFinal_Setup/BAP102_Session3_0916_UCR0120220712/visual_SE_EPI_Encoding_PA_9
+
+echo "Enter the run number"
+read run_num
+echo "You entered ${run_num}, moving on."
+
+cwd=$( pwd )
+mkdir ${cwd}/BAP102
+sub_directory=${cwd}/BAP102
+mkdir ${sub_directory}/visual
+visual=${sub_directory}/visual
+mkdir ${visual}/run${run_num}
+run_dir=${visual}/run${run_num}
+mkdir ${run_dir}/func
+func=${run_dir}/func
+mkdir ${run_dir}/anatomical
+anatomical=${run_dir}/anatomical
+mkdir ${run_dir}/conversions
+conversions=${run_dir}/conversions
+
+echo "Converting T1 dicom data to nii"
+dcm2nii -o ${anatomical} ${T1dir}/*.dcm 
+3dresample -orient lpi -prefix ${anatomical}/T1.nii.gz -input ${anatomical}/2*.nii.gz 
+
+echo "Brain extraction for the T1 image"
+bet ${anatomical}/T1 ${anatomical}/T1_step1 -B -f 0.1 
+flirt -ref ${FSLDIR}/data/standard/MNI152_T1_2mm_brain -in ${anatomical}/T1_step1.nii.gz -omat ${anatomical}/T1_step2.mat -out ${anatomical}/T1_step2 -searchrx -30 30 -searchry -30 30 -searchrz -30 30
+echo "Doing fnirt from T1 space to MNI for the brain extraction."
+fnirt --in=${anatomical}/T1 --aff=${anatomical}/T1_step2.mat --cout=${anatomical}/T1_step3 --config=T1_2_MNI152_2mm
+applywarp --ref=${FSLDIR}/data/standard/MNI152_T1_2mm --in=${anatomical}/T1 --warp=${anatomical}/T1_step3 --out=${anatomical}/T1_step4
+invwarp -w ${anatomical}/T1_step3.nii.gz -o ${anatomical}/T1_step5.nii.gz -r ${anatomical}/T1_step1.nii.gz
+applywarp --ref=${anatomical}/T1 --in=/usr/local/fsl/data/standard/MNI152_T1_1mm_brain_mask.nii.gz --warp=${anatomical}/T1_step5.nii.gz --out=${anatomical}/T1_step6 --interp=nn
+echo "Creating the brain mask."
+fslmaths ${anatomical}/T1_step6.nii.gz -bin ${anatomical}/T1_brain_mask
+fslmaths ${anatomical}/T1 -mas ${anatomical}/T1_brain_mask ${anatomical}/T1_brain
+echo "Check the final extraction."
+fsleyes ${anatomical}/T1 ${anatomical}/T1_brain
+echo "Is the brain extraction satisfactory? (y/n)"
+read answer
+if [ $answer == "y" ]
+then
+echo "Moving on"
+else
+echo "Please make some changes to the script and try again."
+exit
+fi
+
+echo "Converting the raw functional dicom data to niifti."
+dcm2nii -o ${func} ${fmri_input}/*.dcm
+mv ${func}/2*.nii.gz ${func}/raw_file.nii.gz
+
+
+##echo "check the orientations please, if they are not the same, terminate the script."
+
+##fsleyes ${func}/raw_file.nii.gz ${anatomical}/T1.nii.gz
+
+echo "Converting AP dicom data to nii"
+dcm2nii -o ${func} ${AP}/*.dcm
+mv ${func}/2*.nii.gz ${func}/b0_ap.nii.gz
+
+echo "Converting PA dicom data to nii"
+dcm2nii -o ${func} ${PA}/*.dcm
+mv ${func}/2*.nii.gz ${func}/b0_pa.nii.gz
+fslmerge -t ${func}/b0_all.nii.gz ${func}/b0_ap.nii.gz ${func}/b0_pa.nii.gz
+
+
+
+
+<< comment
+
+echo "Brain extraction for the T1 image"
+bet ${anatomical}/T1.nii.gz ${anatomical}/T1_brain.nii.gz -m -R
+fsleyes ${anatomical}/T1.nii.gz ${anatomical}/T1_brain.nii.gz
+echo "T1 extraction done"
+echo "Is the brain extraction satisfactory? (y/n)"
+read answer
+if [ $answer == "y" ]
+then
+echo "Moving on"
+else
+echo "Please enter the center of the brain in the format x y z"
+read center
+bet ${anatomical}/T1.nii.gz ${anatomical}/T1_brain.nii.gz -m -R -c ${center}
+sleep 30
+fsleyes ${anatomical}/T1.nii.gz ${anatomical}/T1_brain.nii.gz
+fi
+
+comment
+echo "Using the slicetimer command to do the slice timing. tcustom option is used to get the slice_timing files. tr=1.75."
+slicetimer -i ${func}/raw_file.nii.gz -o ${func}/inter_tc.nii.gz -r 1.75 --tcustom=/home/aghaffari/lcaging_fmri/correct_slice_time_visual.txt
+
+echo "Now doing the motion correction with correspondence to the middle volume."
+mcflirt -in ${func}/inter_tc.nii.gz -out ${func}/inter_mc.nii.gz
+
+
+echo " Correcting the susceptibility problems using the topup command."
+topup --imain=${func}/b0_all.nii.gz --datain=/home/aghaffari/acq_param_aging.txt --config=b02b0.cnf --out=${func}/my_topup_results --iout=${func}/b0_corr
+
+
+echo "Applying the corrected B0 field to the images"
+applytopup --imain=${func}/inter_mc.nii.gz --inindex=1 --datain=/home/aghaffari/acq_param_aging.txt --topup=${func}/my_topup_results --out=${func}/inter_sc.nii.gz --method=jac -v
+
+echo "Check the images for correction of the susceptibility problems."
+fsleyes
+echo "press any key to continue."
+read key
+echo "You entered ${key}, moving on."
+
+echo "Averaging the corrected images"
+fslmaths ${func}/inter_sc.nii.gz -Tmean ${func}/fMRI_avg.nii.gz
+
+
+echo "Brain extraction for the functional image"
+bet ${func}/fMRI_avg.nii.gz ${func}/fMRI_avg_brain.nii.gz -m -R
+echo "functional extraction done"
+echo "Is the brain extraction satisfactory? (y/n)"
+fsleyes ${func}/fMRI_avg.nii.gz ${func}/fMRI_avg_brain.nii.gz
+read answer
+if [ $answer == "y" ]
+then
+echo "Moving on"
+else
+echo "Please enter the center of the brain in the format x y z"
+read center
+bet ${func}/fMRI_avg.nii.gz ${func}/fMRI_avg_brain.nii.gz -m -R -c ${center}
+sleep 30
+fsleyes ${func}/fMRI_avg.nii.gz ${func}/fMRI_avg_brain.nii.gz
+fi
+
+echo "Now doing the spatial smoothing and applying highpass filter."
+susceptibility_corrected_directory=${func}/inter_sc.nii.gz
+python smoothing_highpass_script.py "$susceptibility_corrected_directory"
+
+echo "T1 image segmentation."
+fast -t 1 -n 3 -H 0.1 -I 4 -l 20.0 -g --nopve -b -o ${anatomical}/T1_brain
+mv ${anatomical}/T1_brain_seg_2.nii.gz ${anatomical}/T1_wm.nii.gz
+echo "Check the segmentation."
+sleep 30
+fsleyes ${anatomical}/T1_brain ${anatomical}/T1_wm.nii.gz
+
+
+echo "Getting the fMRI to T1 conversion file."
+epi_reg --epi=${func}/fMRI_avg_brain --t1=${anatomical}/T1 --t1brain=${anatomical}/T1_brain --out=${conversions}/fMRI2T1 --wmseg=${anatomical}/T1_wm
+mv ${conversions}/fMRI2T1.mat ${conversions}/fMRI2str.mat
+echo "Getting the conversion matrix from structural to functional environment by getting inverse of fMRItoT1."
+convert_xfm -omat ${conversions}/str2fMRI.mat -inverse ${conversions}/fMRI2str.mat
+echo "Transformation of our brain from T1 to fMRI."
+flirt -in ${anatomical}/T1_brain -ref ${func}/fMRI_avg_brain -applyxfm -init ${conversions}/str2fMRI.mat -out ${anatomical}/T1_fMRI
+echo "Check the conversion"
+fsleyes ${anatomical}/T1_fMRI ${func}/fMRI_avg_brain
+
+echo "Getting the initial guess for transformation from T1 to MNI."
+flirt -ref /usr/local/fsl/data/standard/MNI152_T1_2mm_brain -in ${anatomical}/T1_brain -omat ${conversions}/T1_affine.mat
+echo "Extraction of the coefficients for T1 to MNI conversion."
+echo "As the config, by default it goes to fsldir, etc, flirtsch to find the defined file there."
+fnirt --in=${anatomical}/T1 --aff=${conversions}/T1_affine.mat --cout=${conversions}/coef_T1_2_MNI --config=T1_2_MNI152_2mm 
+echo "Check the transformation."
+applywarp --ref=/usr/local/fsl/data/standard/MNI152_T1_2mm_brain --in=${anatomical}/T1_brain --warp=${conversions}/coef_T1_2_MNI --out=${anatomical}/T1_MNI
+fsleyes /usr/local/fsl/data/standard/MNI152_T1_2mm_brain ${anatomical}/T1_MNI
+
+
+
+
+echo "Now we need to tranform the regions of interest from MNI to T1 space."
+echo "First we need to get the inverse of the transformation from T1 to MNI."
+invwarp -w ${conversions}/coef_T1_2_MNI -o ${conversions}/coef_MNI_2_T1 -r ${anatomical}/T1_brain 
+echo "Now we need to apply the inverse transformation to the regions of interest."
+applywarp --in=${cwd}/RightV1.nii.gz --ref=${anatomical}/T1 --warp=${conversions}/coef_MNI_2_T1 --out=${anatomical}/RightV1_T1
+applywarp --in=${cwd}/LeftV1.nii.gz --ref=${anatomical}/T1 --warp=${conversions}/coef_MNI_2_T1 --out=${anatomical}/LeftV1_T1
+
+
+echo "Now we need to transform the regions of interest from T1 to fMRI space."
+flirt -in ${anatomical}/RightV1_T1 -ref ${func}/fMRI_avg_brain -applyxfm -init ${conversions}/str2fMRI.mat -out ${func}/RightV1_fMRI
+flirt -in ${anatomical}/LeftV1_T1 -ref ${func}/fMRI_avg_brain -applyxfm -init ${conversions}/str2fMRI.mat -out ${func}/LeftV1_fMRI
+
+echo "Now applying some thrsholding to the masks."
+fslmaths ${func}/RightV1_fMRI -thr 25 ${func}/RightV1_thr_fMRI
+fslmaths ${func}/LeftV1_fMRI -thr 25 ${func}/LeftV1_thr_fMRI
+
+
